@@ -50,10 +50,10 @@ jobs:
             /usr/local/lib/android \
             /usr/local/.ghcup \
             /opt/hostedtoolcache/CodeQL
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo fallocate -l 8G /swapfile_extra
+          sudo chmod 600 /swapfile_extra
+          sudo mkswap /swapfile_extra
+          sudo swapon /swapfile_extra
           free -h
           df -h
 
