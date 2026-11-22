@@ -237,6 +237,12 @@ jobs:
 
           make "${MAKE_ARGS[@]}" gki_defconfig
 
+          # KMI-safe network (BBR, TTL/HL, IP_SET, IPv6 NAT, TPROXY) & tmpfs xattr/ACL extras
+          ./scripts/config --file out/.config \
+            -e TCP_CONG_ADVANCED -e TCP_CONG_CUBIC -e TCP_CONG_BBR -e DEFAULT_BBR -e NET_SCH_DEFAULT -e DEFAULT_FQ \
+            -e NETFILTER_ADVANCED -e IP_NF_MANGLE -e IP6_NF_MANGLE -e NETFILTER_XT_TARGET_HL -e IP_NF_TARGET_TTL -e IP6_NF_TARGET_HL -e NETFILTER_XT_TARGET_TPROXY -e IP_SET -e NETFILTER_XT_SET -e IP_SET_BITMAP_IP -e IP_SET_BITMAP_IPMAC -e IP_SET_BITMAP_PORT -e IP_SET_HASH_IP -e IP_SET_HASH_IPMARK -e IP_SET_HASH_IPPORT -e IP_SET_HASH_IPPORTIP -e IP_SET_HASH_IPPORTNET -e IP_SET_HASH_IPMAC -e IP_SET_HASH_MAC -e IP_SET_HASH_NETPORTNET -e IP_SET_HASH_NET -e IP_SET_HASH_NETNET -e IP_SET_HASH_NETPORT -e IP_SET_HASH_NETIFACE -e IP_SET_LIST_SET -e NF_NAT -e IP6_NF_NAT -e IP6_NF_TARGET_MASQUERADE \
+            -e TMPFS_XATTR -e TMPFS_POSIX_ACL
+
           if [ "${KSU_VARIANT}" != "none" ]; then
             ./scripts/config --file out/.config -e KSU
             if [ "${ENABLE_SUSFS}" = "true" ]; then
@@ -278,6 +284,23 @@ jobs:
           esac
 
           make "${MAKE_ARGS[@]}" olddefconfig
+
+          for sym in \
+            WIREGUARD CFI_CLANG EXFAT_FS CRYPTO_ZSTD CRYPTO_LZ4 \
+            NET_SCH_FQ NET_SCH_FQ_CODEL DEFAULT_FQ \
+            TCP_CONG_BBR TCP_CONG_CUBIC DEFAULT_BBR \
+            NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL \
+            IP_SET NETFILTER_XT_SET IP_SET_HASH_IP IP_SET_HASH_NET \
+            NETFILTER_XT_TARGET_TPROXY IP6_NF_NAT IP6_NF_TARGET_MASQUERADE \
+            TMPFS_XATTR TMPFS_POSIX_ACL; do
+            if [ "${sym}" = "CFI_CLANG" ] && [ "${LTO_MODE}" = "none" ]; then
+              continue
+            fi
+            if ! grep -q "^CONFIG_${sym}=y$" out/.config; then
+              echo "ERROR: Missing expected CONFIG_${sym}=y in out/.config"
+              exit 1
+            fi
+          done
 
           if [ "${KSU_VARIANT}" != "none" ]; then
             grep -q "^CONFIG_KSU=y$" out/.config
@@ -401,6 +424,7 @@ jobs:
             - **Kernel Release:** `${{ steps.build.outputs.kernel_release }}`
             - **SUSFS:** `${{ steps.build.outputs.enable_susfs }}`
             - **LTO:** `${{ inputs.lto || 'full' }}`
+            - **Extras:** BBR, TTL/HL, IP_SET, IPv6 NAT, TPROXY, WireGuard, Tmpfs xattr/ACL
             - **Commit:** `${{ github.sha }}`
             - **Flashable ZIP:** `${{ steps.package.outputs.zip_name }}`
           files: release-assets/*
