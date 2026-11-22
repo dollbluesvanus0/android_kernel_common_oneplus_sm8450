@@ -54,7 +54,7 @@ on:
       create_release:
         description: 'Publish flashable AnyKernel3 ZIP as a GitHub Release'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -327,29 +327,32 @@ jobs:
             KERNEL_STR="Realme GT 2 Pro (${KERNEL_RELEASE})"
           fi
 
-          rm -rf ak3-stage
+          rm -rf ak3-stage release-assets
+          mkdir -p release-assets
           cp -r kernel_platform/common/AnyKernel3 ak3-stage
           cp kernel_platform/common/out/arch/arm64/boot/Image ak3-stage/Image
+          rm -rf ak3-stage/.git* ak3-stage/README.md
+          find ak3-stage -name '*placeholder' -delete
 
           sed -i "s|^kernel.string=.*|kernel.string=${KERNEL_STR}|" ak3-stage/anykernel.sh
 
           (
             cd ak3-stage
-            zip -r9 "${GITHUB_WORKSPACE}/${ZIP_NAME}" . -x '*.git*' 'README.md' '*placeholder'
+            zip -r9 "${GITHUB_WORKSPACE}/release-assets/${ZIP_NAME}" .
           )
 
           echo "zip_name=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
-          echo "zip_path=${GITHUB_WORKSPACE}/${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "zip_path=${GITHUB_WORKSPACE}/release-assets/${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
 
-          ls -lh "${GITHUB_WORKSPACE}/${ZIP_NAME}"
-          sha256sum "${GITHUB_WORKSPACE}/${ZIP_NAME}"
-          unzip -l "${GITHUB_WORKSPACE}/${ZIP_NAME}"
+          ls -lh "${GITHUB_WORKSPACE}/release-assets/${ZIP_NAME}"
+          sha256sum "${GITHUB_WORKSPACE}/release-assets/${ZIP_NAME}"
+          unzip -l "${GITHUB_WORKSPACE}/release-assets/${ZIP_NAME}"
 
-      - name: Upload AnyKernel3 ZIP artifact
+      - name: Upload AnyKernel3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-RealmeGT2Pro-${{ steps.build.outputs.build_date }}
-          path: ${{ steps.package.outputs.zip_path }}
+          name: AnyKernel3-RealmeGT2Pro-${{ steps.build.outputs.ksu_tag || 'Stock' }}-${{ steps.build.outputs.kernel_release }}-${{ steps.build.outputs.build_date }}
+          path: ak3-stage
           retention-days: 30
           if-no-files-found: error
 
@@ -372,7 +375,8 @@ jobs:
           bash build_ksu_module.sh
           MODULE_PATH="${GITHUB_WORKSPACE}/susfs4ksu/ksu_module_susfs.zip"
           test -f "${MODULE_PATH}"
-          echo "module_path=${MODULE_PATH}" >> "${GITHUB_OUTPUT}"
+          cp "${MODULE_PATH}" "${GITHUB_WORKSPACE}/release-assets/ksu_module_susfs-${{ steps.build.outputs.kernel_release }}.zip"
+          echo "module_path=${GITHUB_WORKSPACE}/release-assets/ksu_module_susfs-${{ steps.build.outputs.kernel_release }}.zip" >> "${GITHUB_OUTPUT}"
           ls -lh "${MODULE_PATH}"
           sha256sum "${MODULE_PATH}"
           unzip -l "${MODULE_PATH}"
@@ -382,12 +386,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: susfs4ksu-module-${{ steps.build.outputs.build_date }}
-          path: ${{ steps.package-susfs.outputs.module_path }}
+          path: susfs4ksu/ksu_module_susfs
           retention-days: 30
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: ${{ inputs.create_release == true }}
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}-${{ steps.build.outputs.build_date }}
@@ -399,6 +403,4 @@ jobs:
             - **LTO:** `${{ inputs.lto || 'full' }}`
             - **Commit:** `${{ github.sha }}`
             - **Flashable ZIP:** `${{ steps.package.outputs.zip_name }}`
-          files: |
-            ${{ steps.package.outputs.zip_path }}
-            ${{ steps.package-susfs.outputs.module_path }}
+          files: release-assets/*
