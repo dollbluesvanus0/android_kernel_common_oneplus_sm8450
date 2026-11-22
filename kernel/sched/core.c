@@ -3567,7 +3567,7 @@ void sched_post_fork(struct task_struct *p)
 	uclamp_post_fork(p);
 }
 
-unsigned long to_ratio(u64 period, u64 runtime)
+u64 to_ratio(u64 period, u64 runtime)
 {
 	if (runtime == RUNTIME_INF)
 		return BW_UNIT;
@@ -7964,6 +7964,7 @@ void sched_move_task(struct task_struct *tsk)
 #if IS_ENABLED(CONFIG_OPLUS_SCHED_TUNE)
 	schedtune_attach(tsk);
 #endif
+	trace_android_vh_sched_move_task(tsk);
 	rq = task_rq_lock(tsk, &rf);
 	update_rq_clock(rq);
 
@@ -8007,6 +8008,7 @@ cpu_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 #if IS_ENABLED(CONFIG_OPLUS_SCHED_TUNE)
 		schedtune_root_alloc();
 #endif
+		trace_android_vh_cpu_cgroup_css_alloc_early(parent);
 		/* This is early initialization for the top cgroup */
 		return &root_task_group.css;
 	}
@@ -8018,6 +8020,7 @@ cpu_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 #if IS_ENABLED(CONFIG_OPLUS_SCHED_TUNE)
 	schedtune_alloc(tg, parent_css);
 #endif
+	trace_android_vh_cpu_cgroup_css_alloc(tg, parent_css);
 	return &tg->css;
 }
 
@@ -8061,6 +8064,7 @@ static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
 #if IS_ENABLED(CONFIG_OPLUS_SCHED_TUNE)
 	schedtune_free(css);
 #endif
+	trace_android_vh_cpu_cgroup_css_free(css);
 }
 
 /*
@@ -8920,7 +8924,7 @@ struct cgroup_subsys cpu_cgrp_subsys = {
 	.early_init	= true,
 	.threaded	= true,
 };
-
+EXPORT_SYMBOL_GPL(cpu_cgrp_subsys);
 #endif	/* CONFIG_CGROUP_SCHED */
 
 void dump_cpu_task(int cpu)
