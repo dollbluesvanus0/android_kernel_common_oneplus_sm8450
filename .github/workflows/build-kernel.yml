@@ -8,6 +8,20 @@ on:
       - '**.md'
   workflow_dispatch:
     inputs:
+      ksu_variant:
+        description: 'KernelSU variant (official = tiann/KernelSU, next = KernelSU-Next, none = stock)'
+        required: true
+        default: 'official'
+        type: choice
+        options:
+          - official
+          - next
+          - none
+      ksu_ref:
+        description: 'Optional KernelSU tag/branch/commit (leave empty for latest release tag)'
+        required: false
+        default: ''
+        type: string
       lto:
         description: 'Clang LTO mode (full matches stock GKI boot.img)'
         required: true
@@ -127,6 +141,8 @@ jobs:
         id: build
         working-directory: kernel_platform/common
         env:
+          KSU_VARIANT: ${{ inputs.ksu_variant || 'official' }}
+          KSU_REF: ${{ inputs.ksu_ref || '' }}
           LTO_MODE: ${{ inputs.lto || 'full' }}
           KERNEL_SUFFIX: ${{ inputs.kernel_suffix || '' }}
           BUILD_IMAGE_LZ4: ${{ inputs.build_image_lz4 || false }}
@@ -138,13 +154,35 @@ jobs:
           export KBUILD_BUILD_USER=android-build
           export KBUILD_BUILD_HOST=github-actions
 
-          # Save GKI KMI-compliant scmversion (android12-5.10, KMI generation 9, -o- infix)
+          # Save GKI KMI-compliant scmversion BEFORE KernelSU modifies drivers/Makefile & drivers/Kconfig
+          # so -dirty is not appended to kernelrelease.
           rm -f .scmversion
           ./scripts/setlocalversion --save-scmversion . android12-5.10 9
           if [ -n "${KERNEL_SUFFIX}" ]; then
             printf '%s' "${KERNEL_SUFFIX}" >> .scmversion
           fi
           echo "SCMVERSION=$(cat .scmversion)"
+
+          # Integrate KernelSU (kprobes/syscall/LSM hooks for GKI 5.10)
+          KSU_TAG=""
+          if [ "${KSU_VARIANT}" = "official" ]; then
+            echo "Integrating official tiann/KernelSU..."
+            if [ -n "${KSU_REF}" ]; then
+              curl -fsSL "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s "${KSU_REF}"
+            else
+              curl -fsSL "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s
+            fi
+            KSU_TAG="KSU"
+          elif [ "${KSU_VARIANT}" = "next" ]; then
+            echo "Integrating KernelSU-Next..."
+            if [ -n "${KSU_REF}" ]; then
+              curl -fsSL "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s "${KSU_REF}"
+            else
+              curl -fsSL "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s
+            fi
+            KSU_TAG="KSUN"
+          fi
+          echo "ksu_tag=${KSU_TAG}" >> "${GITHUB_OUTPUT}"
 
           MAKE_ARGS=(
             -j"$(nproc)"
@@ -165,6 +203,10 @@ jobs:
           )
 
           make "${MAKE_ARGS[@]}" gki_defconfig
+
+          if [ "${KSU_VARIANT}" != "none" ]; then
+            ./scripts/config --file out/.config -e KSU
+          fi
 
           case "${LTO_MODE}" in
             full)
@@ -188,6 +230,11 @@ jobs:
 
           make "${MAKE_ARGS[@]}" olddefconfig
 
+          if [ "${KSU_VARIANT}" != "none" ]; then
+            grep -q "^CONFIG_KSU=y$" out/.config
+            grep -q "^CONFIG_KPROBES=y$" out/.config
+          fi
+
           TARGETS=(Image)
           if [ "${BUILD_IMAGE_LZ4}" = "true" ]; then
             TARGETS+=(Image.lz4)
@@ -209,13 +256,20 @@ jobs:
           set -euo pipefail
           KERNEL_RELEASE="${{ steps.build.outputs.kernel_release }}"
           BUILD_DATE="${{ steps.build.outputs.build_date }}"
-          ZIP_NAME="AnyKernel3-RealmeGT2Pro-${KERNEL_RELEASE}-${BUILD_DATE}.zip"
+          KSU_TAG="${{ steps.build.outputs.ksu_tag }}"
+          if [ -n "${KSU_TAG}" ]; then
+            ZIP_NAME="AnyKernel3-RealmeGT2Pro-${KSU_TAG}-${KERNEL_RELEASE}-${BUILD_DATE}.zip"
+            KERNEL_STR="Realme GT 2 Pro ${KSU_TAG} (${KERNEL_RELEASE})"
+          else
+            ZIP_NAME="AnyKernel3-RealmeGT2Pro-${KERNEL_RELEASE}-${BUILD_DATE}.zip"
+            KERNEL_STR="Realme GT 2 Pro (${KERNEL_RELEASE})"
+          fi
 
           rm -rf ak3-stage
           cp -r kernel_platform/common/AnyKernel3 ak3-stage
           cp kernel_platform/common/out/arch/arm64/boot/Image ak3-stage/Image
 
-          sed -i "s|^kernel.string=.*|kernel.string=Realme GT 2 Pro (${KERNEL_RELEASE})|" ak3-stage/anykernel.sh
+          sed -i "s|^kernel.string=.*|kernel.string=${KERNEL_STR}|" ak3-stage/anykernel.sh
 
           (
             cd ak3-stage
