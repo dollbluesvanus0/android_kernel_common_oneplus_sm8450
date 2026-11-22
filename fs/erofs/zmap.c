@@ -5,6 +5,7 @@
  * Created by Gao Xiang <gaoxiang25@huawei.com>
  */
 #include "internal.h"
+#include "compress.h"
 #include <asm/unaligned.h>
 #include <trace/events/erofs.h>
 
