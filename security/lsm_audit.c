@@ -433,6 +433,9 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 				 a->u.ibendport->dev_name,
 				 a->u.ibendport->port);
 		break;
+	case LSM_AUDIT_DATA_NLMSGTYPE:
+		audit_log_format(ab, " nl-msgtype=%hu", a->u.nlmsg_type);
+		break;
 	} /* switch (a->type) */
 }
 

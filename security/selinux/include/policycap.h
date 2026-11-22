@@ -16,6 +16,25 @@ enum {
 };
 #define POLICYDB_CAPABILITY_MAX (__POLICYDB_CAPABILITY_MAX - 1)
 
+/*
+ * ANDROID: Define these outside of the enum to preserve the KMI
+ * (struct selinux_state.policycap array size in abi_gki_aarch64.xml).
+ *
+ * Values must match userspace sepolicy capability bit indices in android17-6.18.
+ */
+#define POLICYDB_CAPABILITY_USERSPACE_INITIAL_CONTEXT 8
+#define POLICYDB_CAPABILITY_USERSPACE_INITIAL_CONTEXT_NAME "userspace_initial_context"
+#define POLICYDB_CAPABILITY_NETLINK_XPERM 9
+#define POLICYDB_CAPABILITY_NETLINK_XPERM_NAME "netlink_xperm"
+#define POLICYDB_CAPABILITY_NETIF_WILDCARD 10
+#define POLICYDB_CAPABILITY_NETIF_WILDCARD_NAME "netif_wildcard"
+#define POLICYDB_CAPABILITY_GENFS_SECLABEL_WILDCARD 11
+#define POLICYDB_CAPABILITY_GENFS_SECLABEL_WILDCARD_NAME "genfs_seclabel_wildcard"
+#define POLICYDB_CAPABILITY_FUNCTIONFS_SECLABEL 12
+#define POLICYDB_CAPABILITY_FUNCTIONFS_SECLABEL_NAME "functionfs_seclabel"
+#define POLICYDB_CAPABILITY_MEMFD_CLASS 13
+#define POLICYDB_CAPABILITY_MEMFD_CLASS_NAME "memfd_class"
+
 extern const char *selinux_policycap_names[__POLICYDB_CAPABILITY_MAX];
 
 #endif /* _SELINUX_POLICYCAP_H_ */

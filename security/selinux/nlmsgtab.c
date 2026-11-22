@@ -172,11 +172,19 @@ int selinux_nlmsg_lookup(u16 sclass, u16 nlmsg_type, u32 *perm)
 		 * before updating the BUILD_BUG_ON() macro!
 		 */
 		BUILD_BUG_ON(RTM_MAX != (RTM_NEWVLAN + 3));
+		if (selinux_policycap_netlink_xperm()) {
+			*perm = NETLINK_ROUTE_SOCKET__NLMSG;
+			return 0;
+		}
 		err = nlmsg_perm(nlmsg_type, perm, nlmsg_route_perms,
 				 sizeof(nlmsg_route_perms));
 		break;
 
 	case SECCLASS_NETLINK_TCPDIAG_SOCKET:
+		if (selinux_policycap_netlink_xperm()) {
+			*perm = NETLINK_TCPDIAG_SOCKET__NLMSG;
+			return 0;
+		}
 		err = nlmsg_perm(nlmsg_type, perm, nlmsg_tcpdiag_perms,
 				 sizeof(nlmsg_tcpdiag_perms));
 		break;
@@ -187,15 +195,22 @@ int selinux_nlmsg_lookup(u16 sclass, u16 nlmsg_type, u32 *perm)
 		 * before updating the BUILD_BUG_ON() macro!
 		 */
 		BUILD_BUG_ON(XFRM_MSG_MAX != XFRM_MSG_MAPPING);
+		if (selinux_policycap_netlink_xperm()) {
+			*perm = NETLINK_XFRM_SOCKET__NLMSG;
+			return 0;
+		}
 		err = nlmsg_perm(nlmsg_type, perm, nlmsg_xfrm_perms,
 				 sizeof(nlmsg_xfrm_perms));
 		break;
 
 	case SECCLASS_NETLINK_AUDIT_SOCKET:
-		if ((nlmsg_type >= AUDIT_FIRST_USER_MSG &&
-		     nlmsg_type <= AUDIT_LAST_USER_MSG) ||
-		    (nlmsg_type >= AUDIT_FIRST_USER_MSG2 &&
-		     nlmsg_type <= AUDIT_LAST_USER_MSG2)) {
+		if (selinux_policycap_netlink_xperm()) {
+			*perm = NETLINK_AUDIT_SOCKET__NLMSG;
+			return 0;
+		} else if ((nlmsg_type >= AUDIT_FIRST_USER_MSG &&
+			    nlmsg_type <= AUDIT_LAST_USER_MSG) ||
+			   (nlmsg_type >= AUDIT_FIRST_USER_MSG2 &&
+			    nlmsg_type <= AUDIT_LAST_USER_MSG2)) {
 			*perm = NETLINK_AUDIT_SOCKET__NLMSG_RELAY;
 		} else {
 			err = nlmsg_perm(nlmsg_type, perm, nlmsg_audit_perms,

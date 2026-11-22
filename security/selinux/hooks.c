@@ -92,6 +92,7 @@
 #include <uapi/linux/mount.h>
 #include <linux/fsnotify.h>
 #include <linux/fanotify.h>
+#include <linux/memfd.h>
 
 #include "avc.h"
 #include "objsec.h"
@@ -2339,6 +2340,10 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	new_tsec = selinux_cred(bprm->cred);
 	isec = inode_security(inode);
 
+	if (WARN_ON(isec->sclass != SECCLASS_FILE &&
+		    isec->sclass != SECCLASS_MEMFD_FILE))
+		return -EACCES;
+
 	/* Default to the current task SID. */
 	new_tsec->sid = old_tsec->sid;
 	new_tsec->osid = old_tsec->sid;
@@ -2347,6 +2352,19 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	new_tsec->create_sid = 0;
 	new_tsec->keycreate_sid = 0;
 	new_tsec->sockcreate_sid = 0;
+
+	/*
+	 * Before policy is loaded, label any task outside kernel space
+	 * as SECINITSID_INIT, so that any userspace tasks surviving from
+	 * early boot end up with a label different from SECINITSID_KERNEL
+	 * (if the policy chooses to set SECINITSID_INIT != SECINITSID_KERNEL).
+	 */
+	if (!selinux_initialized(&selinux_state)) {
+		new_tsec->sid = SECINITSID_INIT;
+		/* also clear the exec_sid just in case */
+		new_tsec->exec_sid = 0;
+		return 0;
+	}
 
 	if (old_tsec->exec_sid) {
 		new_tsec->sid = old_tsec->exec_sid;
@@ -2380,7 +2398,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	if (new_tsec->sid == old_tsec->sid) {
 		rc = avc_has_perm(&selinux_state,
 				  old_tsec->sid, isec->sid,
-				  SECCLASS_FILE, FILE__EXECUTE_NO_TRANS, &ad);
+				  isec->sclass, FILE__EXECUTE_NO_TRANS, &ad);
 		if (rc)
 			return rc;
 	} else {
@@ -2393,7 +2411,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 
 		rc = avc_has_perm(&selinux_state,
 				  new_tsec->sid, isec->sid,
-				  SECCLASS_FILE, FILE__ENTRYPOINT, &ad);
+				  isec->sclass, FILE__ENTRYPOINT, &ad);
 		if (rc)
 			return rc;
 
@@ -2970,9 +2988,17 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 	struct common_audit_data ad;
 	struct inode_security_struct *isec;
 	int rc;
+	bool is_memfd = false;
 
 	if (unlikely(!selinux_initialized(&selinux_state)))
 		return 0;
+
+	if (name != NULL && name->name != NULL &&
+	    !strcmp((const char *)name->name, MEMFD_ANON_NAME)) {
+		if (!selinux_policycap_memfd_class())
+			return 0;
+		is_memfd = true;
+	}
 
 	isec = selinux_inode(inode);
 
@@ -2993,7 +3019,8 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 		isec->sclass = context_isec->sclass;
 		isec->sid = context_isec->sid;
 	} else {
-		isec->sclass = SECCLASS_ANON_INODE;
+		isec->sclass = is_memfd ? SECCLASS_MEMFD_FILE
+					: SECCLASS_ANON_INODE;
 		rc = security_transition_sid(
 			&selinux_state, tsec->sid, tsec->sid,
 			isec->sclass, name, &isec->sid);
@@ -3847,7 +3874,8 @@ static int ioctl_has_perm(const struct cred *cred, struct file *file,
 	isec = inode_security(inode);
 	rc = avc_has_extended_perms(&selinux_state,
 				    ssid, isec->sid, isec->sclass,
-				    requested, driver, xperm, &ad);
+				    requested, driver, AVC_EXT_IOCTL,
+				    xperm, &ad);
 out:
 	return rc;
 }
@@ -4757,13 +4785,35 @@ static int socket_sockcreate_sid(const struct task_security_struct *tsec,
 				       secclass, NULL, socksid);
 }
 
+static bool sock_skip_has_perm(u32 sid)
+{
+	if (sid == SECINITSID_KERNEL)
+		return true;
+
+	/*
+	 * Before POLICYDB_CAPABILITY_USERSPACE_INITIAL_CONTEXT, sockets that
+	 * inherited the kernel context from early boot used to be skipped
+	 * here, so preserve that behavior unless the capability is set.
+	 *
+	 * By setting the capability the policy signals that it is ready
+	 * for this quirk to be fixed. Note that sockets created by a kernel
+	 * thread or a usermode helper executed without a transition will
+	 * still be skipped in this check regardless of the policycap
+	 * setting.
+	 */
+	if (!selinux_policycap_userspace_initial_context() &&
+	    sid == SECINITSID_INIT)
+		return true;
+	return false;
+}
+
 static int sock_has_perm(struct sock *sk, u32 perms)
 {
 	struct sk_security_struct *sksec = sk->sk_security;
 	struct common_audit_data ad;
 	struct lsm_network_audit net = {0,};
 
-	if (sksec->sid == SECINITSID_KERNEL)
+	if (sock_skip_has_perm(sksec->sid))
 		return 0;
 
 	ad.type = LSM_AUDIT_DATA_NET;
@@ -6131,6 +6181,29 @@ static unsigned int selinux_ipv6_postroute(void *priv,
 
 #endif	/* CONFIG_NETFILTER */
 
+static int nlmsg_sock_has_extended_perms(struct sock *sk, u32 perms,
+					 u16 nlmsg_type)
+{
+	struct sk_security_struct *sksec = sk->sk_security;
+	struct common_audit_data ad;
+	u8 driver;
+	u8 xperm;
+
+	if (sock_skip_has_perm(sksec->sid))
+		return 0;
+
+	ad.type = LSM_AUDIT_DATA_NLMSGTYPE;
+	ad.u.nlmsg_type = nlmsg_type;
+
+	driver = nlmsg_type >> 8;
+	xperm = nlmsg_type & 0xff;
+
+	return avc_has_extended_perms(&selinux_state,
+				      current_sid(), sksec->sid, sksec->sclass,
+				      perms, driver, AVC_EXT_NLMSG,
+				      xperm, &ad);
+}
+
 static int selinux_netlink_send(struct sock *sk, struct sk_buff *skb)
 {
 	int rc = 0;
@@ -6156,7 +6229,11 @@ static int selinux_netlink_send(struct sock *sk, struct sk_buff *skb)
 
 		rc = selinux_nlmsg_lookup(sclass, nlh->nlmsg_type, &perm);
 		if (rc == 0) {
-			rc = sock_has_perm(sk, perm);
+			if (selinux_policycap_netlink_xperm())
+				rc = nlmsg_sock_has_extended_perms(
+					sk, perm, nlh->nlmsg_type);
+			else
+				rc = sock_has_perm(sk, perm);
 			if (rc)
 				return rc;
 		} else if (rc == -EINVAL) {

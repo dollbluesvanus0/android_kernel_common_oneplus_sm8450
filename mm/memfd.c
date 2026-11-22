@@ -18,6 +18,7 @@
 #include <linux/hugetlb.h>
 #include <linux/shmem_fs.h>
 #include <linux/memfd.h>
+#include <linux/security.h>
 #include <uapi/linux/memfd.h>
 
 /*
@@ -269,9 +270,12 @@ SYSCALL_DEFINE2(memfd_create,
 {
 	unsigned int *file_seals;
 	struct file *file;
+	struct inode *inode;
 	int fd, error;
 	char *name;
 	long len;
+	struct qstr qname = QSTR_INIT(MEMFD_ANON_NAME,
+				      sizeof(MEMFD_ANON_NAME) - 1);
 
 	if (!(flags & MFD_HUGETLB)) {
 		if (flags & ~(unsigned int)MFD_ALL_FLAGS)
@@ -325,6 +329,11 @@ SYSCALL_DEFINE2(memfd_create,
 		error = PTR_ERR(file);
 		goto err_fd;
 	}
+	inode = file_inode(file);
+	error = security_inode_init_security_anon(inode, &qname, NULL);
+	if (error)
+		goto err_file;
+
 	file->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
 	file->f_flags |= O_LARGEFILE;
 
@@ -338,6 +347,8 @@ SYSCALL_DEFINE2(memfd_create,
 	kfree(name);
 	return fd;
 
+err_file:
+	fput(file);
 err_fd:
 	put_unused_fd(fd);
 err_name:

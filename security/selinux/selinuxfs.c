@@ -2125,11 +2125,54 @@ out:
 	return rc;
 }
 
+static const struct {
+	unsigned int cap;
+	const char *name;
+} selinux_android_policycaps[] = {
+	{ POLICYDB_CAPABILITY_USERSPACE_INITIAL_CONTEXT,
+	  POLICYDB_CAPABILITY_USERSPACE_INITIAL_CONTEXT_NAME },
+	{ POLICYDB_CAPABILITY_NETLINK_XPERM,
+	  POLICYDB_CAPABILITY_NETLINK_XPERM_NAME },
+	{ POLICYDB_CAPABILITY_NETIF_WILDCARD,
+	  POLICYDB_CAPABILITY_NETIF_WILDCARD_NAME },
+	{ POLICYDB_CAPABILITY_GENFS_SECLABEL_WILDCARD,
+	  POLICYDB_CAPABILITY_GENFS_SECLABEL_WILDCARD_NAME },
+	{ POLICYDB_CAPABILITY_FUNCTIONFS_SECLABEL,
+	  POLICYDB_CAPABILITY_FUNCTIONFS_SECLABEL_NAME },
+	{ POLICYDB_CAPABILITY_MEMFD_CLASS,
+	  POLICYDB_CAPABILITY_MEMFD_CLASS_NAME },
+};
+
+static int sel_make_android_policycap(struct selinux_fs_info *fsi,
+				      unsigned int policycap,
+				      const char *policycap_name)
+{
+	struct dentry *dentry;
+	struct inode *inode;
+
+	dentry = d_alloc_name(fsi->policycap_dir, policycap_name);
+	if (dentry == NULL)
+		return -ENOMEM;
+
+	inode = sel_make_inode(fsi->sb, S_IFREG | 0444);
+	if (inode == NULL) {
+		dput(dentry);
+		return -ENOMEM;
+	}
+
+	inode->i_fop = &sel_policycap_ops;
+	inode->i_ino = policycap | SEL_POLICYCAP_INO_OFFSET;
+	d_add(dentry, inode);
+
+	return 0;
+}
+
 static int sel_make_policycap(struct selinux_fs_info *fsi)
 {
 	unsigned int iter;
 	struct dentry *dentry = NULL;
 	struct inode *inode = NULL;
+	int ret;
 
 	for (iter = 0; iter <= POLICYDB_CAPABILITY_MAX; iter++) {
 		if (iter < ARRAY_SIZE(selinux_policycap_names))
@@ -2150,6 +2193,15 @@ static int sel_make_policycap(struct selinux_fs_info *fsi)
 		inode->i_fop = &sel_policycap_ops;
 		inode->i_ino = iter | SEL_POLICYCAP_INO_OFFSET;
 		d_add(dentry, inode);
+	}
+
+	/* ANDROID: Handle extra policycaps separately to preserve the KMI. */
+	for (iter = 0; iter < ARRAY_SIZE(selinux_android_policycaps); iter++) {
+		ret = sel_make_android_policycap(
+			fsi, selinux_android_policycaps[iter].cap,
+			selinux_android_policycaps[iter].name);
+		if (ret != 0)
+			return ret;
 	}
 
 	return 0;

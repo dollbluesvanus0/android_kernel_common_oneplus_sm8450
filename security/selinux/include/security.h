@@ -112,6 +112,10 @@ void selinux_avc_init(struct selinux_avc **avc);
 
 extern struct selinux_state selinux_state;
 
+extern bool selinux_userspace_initial_context_policycap;
+extern bool selinux_netlink_xperm_policycap;
+extern bool selinux_memfd_class_policycap;
+
 static inline bool selinux_initialized(const struct selinux_state *state)
 {
 	/* do a synchronized load to avoid race conditions */
@@ -228,6 +232,21 @@ static inline bool selinux_policycap_ioctl_skip_cloexec(void)
 	return READ_ONCE(state->policycap[POLICYDB_CAPABILITY_IOCTL_SKIP_CLOEXEC]);
 }
 
+static inline bool selinux_policycap_userspace_initial_context(void)
+{
+	return READ_ONCE(selinux_userspace_initial_context_policycap);
+}
+
+static inline bool selinux_policycap_netlink_xperm(void)
+{
+	return READ_ONCE(selinux_netlink_xperm_policycap);
+}
+
+static inline bool selinux_policycap_memfd_class(void)
+{
+	return READ_ONCE(selinux_memfd_class_policycap);
+}
+
 static inline bool selinux_android_nlroute_getlink(void)
 {
 	struct selinux_state *state = &selinux_state;
@@ -285,6 +304,7 @@ struct extended_perms_data {
 struct extended_perms_decision {
 	u8 used;
 	u8 driver;
+	u8 base_perm;
 	struct extended_perms_data *allowed;
 	struct extended_perms_data *auditallow;
 	struct extended_perms_data *dontaudit;
@@ -292,6 +312,7 @@ struct extended_perms_decision {
 
 struct extended_perms {
 	u16 len;	/* length associated decision chain */
+	u8 base_perms;	/* which base permissions are covered */
 	struct extended_perms_data drivers; /* flag drivers that are used */
 };
 
@@ -305,7 +326,7 @@ void security_compute_av(struct selinux_state *state,
 
 void security_compute_xperms_decision(struct selinux_state *state,
 				      u32 ssid, u32 tsid, u16 tclass,
-				      u8 driver,
+				      u8 driver, u8 base_perm,
 				      struct extended_perms_decision *xpermd);
 
 void security_compute_av_user(struct selinux_state *state,

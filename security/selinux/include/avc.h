@@ -161,9 +161,12 @@ int avc_has_perm_flags(struct selinux_state *state,
 		       struct common_audit_data *auditdata,
 		       int flags);
 
+#define AVC_EXT_IOCTL	(1 << 0) /* Cache entry for an ioctl extended permission */
+#define AVC_EXT_NLMSG	(1 << 1) /* Cache entry for an nlmsg extended permission */
 int avc_has_extended_perms(struct selinux_state *state,
 			   u32 ssid, u32 tsid, u16 tclass, u32 requested,
-			   u8 driver, u8 perm, struct common_audit_data *ad);
+			   u8 driver, u8 base_perm, u8 perm,
+			   struct common_audit_data *ad);
 
 
 u32 avc_policy_seqno(struct selinux_state *state);

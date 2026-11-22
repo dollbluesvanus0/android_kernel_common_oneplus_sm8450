@@ -888,6 +888,7 @@ void policydb_destroy(struct policydb *p)
 int policydb_load_isids(struct policydb *p, struct sidtab *s)
 {
 	struct ocontext *head, *c;
+	bool isid_init;
 	int rc;
 
 	rc = sidtab_init(s);
@@ -895,6 +896,9 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
 		pr_err("SELinux:  out of memory on SID table init\n");
 		return rc;
 	}
+
+	isid_init = ebitmap_get_bit(&p->policycaps,
+				    POLICYDB_CAPABILITY_USERSPACE_INITIAL_CONTEXT);
 
 	head = p->ocontexts[OCON_ISID];
 	for (c = head; c; c = c->next) {
@@ -911,12 +915,38 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
 		if (!name)
 			continue;
 
+		/*
+		 * Also ignore SECINITSID_INIT if the policy doesn't declare
+		 * support for it
+		 */
+		if (sid == SECINITSID_INIT && !isid_init)
+			continue;
+
 		rc = sidtab_set_initial(s, sid, &c->context[0]);
 		if (rc) {
 			pr_err("SELinux:  unable to load initial SID %s.\n",
 			       name);
 			sidtab_destroy(s);
 			return rc;
+		}
+
+		/*
+		 * If the policy doesn't support the "userspace_initial_context"
+		 * capability, set SECINITSID_INIT to the same context as
+		 * SECINITSID_KERNEL. This ensures the same behavior as before
+		 * the reintroduction of SECINITSID_INIT, where all tasks
+		 * started before policy load would initially get the context
+		 * corresponding to SECINITSID_KERNEL.
+		 */
+		if (sid == SECINITSID_KERNEL && !isid_init) {
+			rc = sidtab_set_initial(s, SECINITSID_INIT,
+						&c->context[0]);
+			if (rc) {
+				pr_err("SELinux:  unable to load initial SID %s.\n",
+				       name);
+				sidtab_destroy(s);
+				return rc;
+			}
 		}
 	}
 	return 0;

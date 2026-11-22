@@ -426,6 +426,10 @@ int z_erofs_decompress(struct z_erofs_decompress_req *rq,
 {
 	if (rq->alg == Z_EROFS_COMPRESSION_SHIFTED)
 		return z_erofs_shifted_transform(rq, pagepool);
+#ifdef CONFIG_EROFS_FS_ZIP_LZMA
+	if (rq->alg == Z_EROFS_COMPRESSION_LZMA)
+		return z_erofs_lzma_decompress(rq, pagepool);
+#endif
 	return z_erofs_decompress_generic(rq, pagepool);
 }
 

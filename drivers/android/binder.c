@@ -150,6 +150,13 @@ module_param_call(stop_on_user_error, binder_set_stop_on_user_error,
 			binder_stop_on_user_error = 2; \
 	} while (0)
 
+#define binder_set_extended_error(ee, _id, _command, _param) \
+	do { \
+		(ee)->id = _id; \
+		(ee)->command = _command; \
+		(ee)->param = _param; \
+	} while (0)
+
 #define to_flat_binder_object(hdr) \
 	container_of(hdr, struct flat_binder_object, hdr)
 
@@ -2878,7 +2885,10 @@ binder_find_outdated_transaction_ilocked(struct binder_transaction *t,
  *
  * Return:	0 if the transaction was successfully queued
  *		BR_DEAD_REPLY if the target process or thread is dead
- *		BR_FROZEN_REPLY if the target process or thread is frozen
+ *		BR_FROZEN_REPLY if the target process or thread is frozen and
+ *			the sync transaction was rejected
+ *		BR_TRANSACTION_PENDING_FROZEN if the target process is frozen
+ *			and the async transaction was successfully queued
  */
 static int binder_proc_transaction(struct binder_transaction *t,
 				    struct binder_proc *proc,
@@ -2889,6 +2899,7 @@ static int binder_proc_transaction(struct binder_transaction *t,
 	bool oneway = !!(t->flags & TF_ONE_WAY);
 	bool pending_async = false;
 	struct binder_transaction *t_outdated = NULL;
+	bool frozen = false;
 	bool enqueue_task = true;
 
 	BUG_ON(!node);
@@ -2906,15 +2917,16 @@ static int binder_proc_transaction(struct binder_transaction *t,
 
 	binder_inner_proc_lock(proc);
 	if (proc->is_frozen) {
+		frozen = true;
 		proc->sync_recv |= !oneway;
 		proc->async_recv |= oneway;
 	}
 
-	if ((proc->is_frozen && !oneway) || proc->is_dead ||
+	if ((frozen && !oneway) || proc->is_dead ||
 			(thread && thread->is_dead)) {
 		binder_inner_proc_unlock(proc);
 		binder_node_unlock(node);
-		return proc->is_frozen ? BR_FROZEN_REPLY : BR_DEAD_REPLY;
+		return frozen ? BR_FROZEN_REPLY : BR_DEAD_REPLY;
 	}
 
 	if (!thread && !pending_async)
@@ -2934,7 +2946,7 @@ static int binder_proc_transaction(struct binder_transaction *t,
 		if (enqueue_task)
 			binder_enqueue_work_ilocked(&t->work, &proc->todo);
 	} else {
-		if ((t->flags & TF_UPDATE_TXN) && proc->is_frozen) {
+		if ((t->flags & TF_UPDATE_TXN) && frozen) {
 			t_outdated = binder_find_outdated_transaction_ilocked(t,
 									      &node->async_todo);
 			if (t_outdated) {
@@ -2978,6 +2990,9 @@ static int binder_proc_transaction(struct binder_transaction *t,
 		kfree(t_outdated);
 		binder_stats_deleted(BINDER_STAT_TRANSACTION);
 	}
+
+	if (oneway && frozen)
+		return BR_TRANSACTION_PENDING_FROZEN;
 
 	return 0;
 }
@@ -3024,6 +3039,25 @@ static struct binder_node *binder_get_node_refs_for_txn(
 	return target_node;
 }
 
+static void binder_set_txn_from_error(struct binder_transaction *t, int id,
+				      uint32_t command, int32_t param)
+{
+	struct binder_thread *from = binder_get_txn_from_and_acq_inner(t);
+
+	if (!from) {
+		/* annotation for sparse */
+		__release(&from->proc->inner_lock);
+		return;
+	}
+
+	/* don't override existing errors */
+	if (thread_wrapper(from)->ee.command == BR_OK)
+		binder_set_extended_error(&thread_wrapper(from)->ee, id,
+					  command, param);
+	binder_inner_proc_unlock(from->proc);
+	binder_thread_dec_tmpref(from);
+}
+
 static void binder_transaction(struct binder_proc *proc,
 			       struct binder_thread *thread,
 			       struct binder_transaction_data *tr, int reply,
@@ -3032,7 +3066,7 @@ static void binder_transaction(struct binder_proc *proc,
 	int ret;
 	struct binder_transaction *t;
 	struct binder_work *w;
-	struct binder_work *tcomplete;
+	struct binder_error *tcomplete;
 	binder_size_t buffer_offset = 0;
 	binder_size_t off_start_offset, off_end_offset;
 	binder_size_t off_min;
@@ -3068,6 +3102,11 @@ static void binder_transaction(struct binder_proc *proc,
 	e->data_size = tr->data_size;
 	e->offsets_size = tr->offsets_size;
 	strscpy(e->context_name, proc->context->name, BINDERFS_MAX_NAME);
+
+	binder_inner_proc_lock(proc);
+	binder_set_extended_error(&thread_wrapper(thread)->ee, t_debug_id,
+				  BR_OK, 0);
+	binder_inner_proc_unlock(proc);
 
 	if (reply) {
 		binder_inner_proc_lock(proc);
@@ -3347,7 +3386,7 @@ static void binder_transaction(struct binder_proc *proc,
 		if (extra_buffers_size < added_size) {
 			/* integer overflow of extra_buffers_size */
 			return_error = BR_FAILED_REPLY;
-			return_error_param = EINVAL;
+			return_error_param = -EINVAL;
 			return_error_line = __LINE__;
 			goto err_bad_extra_size;
 		}
@@ -3702,13 +3741,14 @@ static void binder_transaction(struct binder_proc *proc,
 		goto err_copy_data_failed;
 	}
 	if (t->buffer->oneway_spam_suspect)
-		tcomplete->type = BINDER_WORK_TRANSACTION_ONEWAY_SPAM_SUSPECT;
+		tcomplete->work.type = BINDER_WORK_TRANSACTION_ONEWAY_SPAM_SUSPECT;
 	else
-		tcomplete->type = BINDER_WORK_TRANSACTION_COMPLETE;
+		tcomplete->work.type = BINDER_WORK_TRANSACTION_COMPLETE;
+	tcomplete->cmd = BR_TRANSACTION_COMPLETE;
 	t->work.type = BINDER_WORK_TRANSACTION;
 
 	if (reply) {
-		binder_enqueue_thread_work(thread, tcomplete);
+		binder_enqueue_thread_work(thread, &tcomplete->work);
 		binder_inner_proc_lock(target_proc);
 		if (target_thread->is_dead) {
 			return_error = BR_DEAD_REPLY;
@@ -3734,7 +3774,8 @@ static void binder_transaction(struct binder_proc *proc,
 		 * latency. We will then return the TRANSACTION_COMPLETE when
 		 * the target replies (or there is an error).
 		 */
-		binder_enqueue_deferred_thread_work_ilocked(thread, tcomplete);
+		binder_enqueue_deferred_thread_work_ilocked(thread,
+							   &tcomplete->work);
 		t->need_reply = 1;
 		t->from_parent = thread->transaction_stack;
 		thread->transaction_stack = t;
@@ -3750,9 +3791,19 @@ static void binder_transaction(struct binder_proc *proc,
 	} else {
 		BUG_ON(target_node == NULL);
 		BUG_ON(t->buffer->async_transaction != 1);
-		binder_enqueue_thread_work(thread, tcomplete);
 		return_error = binder_proc_transaction(t, target_proc, NULL);
-		if (return_error)
+		/*
+		 * Let the caller know when async transaction reaches a frozen
+		 * process and is put in a pending queue, waiting for the target
+		 * process to be unfrozen.
+		 */
+		if (return_error == BR_TRANSACTION_PENDING_FROZEN) {
+			tcomplete->work.type = BINDER_WORK_TRANSACTION_COMPLETE;
+			tcomplete->cmd = BR_TRANSACTION_PENDING_FROZEN;
+		}
+		binder_enqueue_thread_work(thread, &tcomplete->work);
+		if (return_error &&
+		    return_error != BR_TRANSACTION_PENDING_FROZEN)
 			goto err_dead_proc_or_thread;
 	}
 	if (target_thread)
@@ -3770,7 +3821,7 @@ static void binder_transaction(struct binder_proc *proc,
 
 err_dead_proc_or_thread:
 	return_error_line = __LINE__;
-	binder_dequeue_work(proc, tcomplete);
+	binder_dequeue_work(proc, &tcomplete->work);
 err_translate_failed:
 err_bad_object_type:
 err_bad_offset:
@@ -3843,10 +3894,17 @@ err_invalid_target_handle:
 	if (in_reply_to) {
 		trace_android_vh_binder_restore_priority(in_reply_to, current);
 		binder_restore_priority(current, in_reply_to->saved_priority);
+		binder_set_txn_from_error(in_reply_to, t_debug_id,
+					  return_error, return_error_param);
 		thread->return_error.cmd = BR_TRANSACTION_COMPLETE;
 		binder_enqueue_thread_work(thread, &thread->return_error.work);
 		binder_send_failed_reply(in_reply_to, return_error);
 	} else {
+		binder_inner_proc_lock(proc);
+		binder_set_extended_error(&thread_wrapper(thread)->ee,
+					  t_debug_id, return_error,
+					  return_error_param);
+		binder_inner_proc_unlock(proc);
 		thread->return_error.cmd = return_error;
 		binder_enqueue_thread_work(thread, &thread->return_error.work);
 	}
@@ -4779,13 +4837,18 @@ retry:
 		} break;
 		case BINDER_WORK_TRANSACTION_COMPLETE:
 		case BINDER_WORK_TRANSACTION_ONEWAY_SPAM_SUSPECT: {
+			struct binder_error *tcomplete = container_of(
+					w, struct binder_error, work);
+
 			if (proc->oneway_spam_detection_enabled &&
 				   w->type == BINDER_WORK_TRANSACTION_ONEWAY_SPAM_SUSPECT)
 				cmd = BR_ONEWAY_SPAM_SUSPECT;
+			else if (tcomplete->cmd == BR_TRANSACTION_PENDING_FROZEN)
+				cmd = BR_TRANSACTION_PENDING_FROZEN;
 			else
 				cmd = BR_TRANSACTION_COMPLETE;
 			binder_inner_proc_unlock(proc);
-			kfree(w);
+			kfree(tcomplete);
 			binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
 			if (put_user(cmd, (uint32_t __user *)ptr))
 				return -EFAULT;
@@ -4793,8 +4856,11 @@ retry:
 
 			binder_stat_br(proc, thread, cmd);
 			binder_debug(BINDER_DEBUG_TRANSACTION_COMPLETE,
-				     "%d:%d BR_TRANSACTION_COMPLETE\n",
-				     proc->pid, thread->pid);
+				     "%d:%d %s\n",
+				     proc->pid, thread->pid,
+				     cmd == BR_TRANSACTION_PENDING_FROZEN ?
+				     "BR_TRANSACTION_PENDING_FROZEN" :
+				     "BR_TRANSACTION_COMPLETE");
 		} break;
 		case BINDER_WORK_NODE: {
 			struct binder_node *node = container_of(w, struct binder_node, work);
@@ -5153,9 +5219,12 @@ static void binder_release_work(struct binder_proc *proc,
 		} break;
 		case BINDER_WORK_TRANSACTION_ONEWAY_SPAM_SUSPECT:
 		case BINDER_WORK_TRANSACTION_COMPLETE: {
+			struct binder_error *tcomplete = container_of(
+					w, struct binder_error, work);
+
 			binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
 				"undelivered TRANSACTION_COMPLETE\n");
-			kfree(w);
+			kfree(tcomplete);
 			binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
 		} break;
 		case BINDER_WORK_DEAD_BINDER_AND_CLEAR:
@@ -5225,6 +5294,7 @@ static struct binder_thread *binder_get_thread_ilocked(
 	thread->return_error.cmd = BR_OK;
 	thread->reply_error.work.type = BINDER_WORK_RETURN_ERROR;
 	thread->reply_error.cmd = BR_OK;
+	thread_wrapper(thread)->ee.command = BR_OK;
 	INIT_LIST_HEAD(&new_thread->waiting_thread_node);
 	return thread;
 }
@@ -5238,14 +5308,17 @@ static struct binder_thread *binder_get_thread(struct binder_proc *proc)
 	thread = binder_get_thread_ilocked(proc, NULL);
 	binder_inner_proc_unlock(proc);
 	if (!thread) {
-		new_thread = kzalloc(sizeof(*thread), GFP_KERNEL);
-		if (new_thread == NULL)
+		struct binder_thread_ext *ethread;
+
+		ethread = kzalloc(sizeof(*ethread), GFP_KERNEL);
+		if (ethread == NULL)
 			return NULL;
+		new_thread = &ethread->thread;
 		binder_inner_proc_lock(proc);
 		thread = binder_get_thread_ilocked(proc, new_thread);
 		binder_inner_proc_unlock(proc);
 		if (thread != new_thread)
-			kfree(new_thread);
+			kfree(ethread);
 	}
 	return thread;
 }
@@ -5276,11 +5349,13 @@ static void binder_free_proc(struct binder_proc *proc)
 
 static void binder_free_thread(struct binder_thread *thread)
 {
+	struct binder_thread_ext *ethread = thread_wrapper(thread);
+
 	BUG_ON(!list_empty(&thread->todo));
 	binder_stats_deleted(BINDER_STAT_THREAD);
 	binder_proc_dec_tmpref(thread->proc);
 	put_task_struct(thread->task);
-	kfree(thread);
+	kfree(ethread);
 }
 
 static int binder_thread_release(struct binder_proc *proc,
@@ -5724,6 +5799,22 @@ static int binder_ioctl_get_freezer_info(
 	return 0;
 }
 
+static int binder_ioctl_get_extended_error(struct binder_thread *thread,
+					   void __user *ubuf)
+{
+	struct binder_extended_error ee;
+
+	binder_inner_proc_lock(thread->proc);
+	ee = thread_wrapper(thread)->ee;
+	binder_set_extended_error(&thread_wrapper(thread)->ee, 0, BR_OK, 0);
+	binder_inner_proc_unlock(thread->proc);
+
+	if (copy_to_user(ubuf, &ee, sizeof(ee)))
+		return -EFAULT;
+
+	return 0;
+}
+
 static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	int ret;
@@ -5932,6 +6023,11 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		binder_inner_proc_unlock(proc);
 		break;
 	}
+	case BINDER_GET_EXTENDED_ERROR:
+		ret = binder_ioctl_get_extended_error(thread, ubuf);
+		if (ret < 0)
+			goto err;
+		break;
 	default:
 		ret = -EINVAL;
 		goto err;
@@ -6420,9 +6516,14 @@ static void print_binder_work_ilocked(struct seq_file *m,
 		seq_printf(m, "%stransaction error: %u\n",
 			   prefix, e->cmd);
 	} break;
-	case BINDER_WORK_TRANSACTION_COMPLETE:
-		seq_printf(m, "%stransaction complete\n", prefix);
-		break;
+	case BINDER_WORK_TRANSACTION_COMPLETE: {
+		struct binder_error *tcomplete = container_of(
+				w, struct binder_error, work);
+
+		seq_printf(m, "%stransaction %s\n", prefix,
+			   tcomplete->cmd == BR_TRANSACTION_PENDING_FROZEN ?
+			   "pending frozen" : "complete");
+	} break;
 	case BINDER_WORK_NODE:
 		node = container_of(w, struct binder_node, work);
 		if (hash_ptrs)

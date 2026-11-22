@@ -555,6 +555,26 @@ struct binder_thread {
 };
 
 /**
+ * struct binder_thread_ext - extended binder thread bookkeeping
+ * @thread:               binder_thread base struct
+ * @ee:                   extended error information
+ *                        (protected by @thread.proc->inner_lock)
+ *
+ * Extended binder_thread -- needed to add the "ee" field without
+ * changing the KMI for binder_thread.
+ */
+struct binder_thread_ext {
+	struct binder_thread thread;
+	struct binder_extended_error ee;
+};
+
+static inline
+struct binder_thread_ext *thread_wrapper(struct binder_thread *thread)
+{
+	return container_of(thread, struct binder_thread_ext, thread);
+}
+
+/**
  * struct binder_txn_fd_fixup - transaction fd fixup list element
  * @fixup_entry:          list entry
  * @file:                 struct file to be associated with new fd
