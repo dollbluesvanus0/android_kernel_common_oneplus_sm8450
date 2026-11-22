@@ -18,9 +18,19 @@ on:
           - next
           - none
       ksu_ref:
-        description: 'Optional KernelSU tag/branch/commit (leave empty for latest release tag)'
+        description: 'Optional KernelSU tag/branch/commit (defaults to 2a60b28 with SUSFS, or latest tag without SUSFS)'
         required: false
         default: ''
+        type: string
+      enable_susfs:
+        description: 'Enable SUSFS v2.4.0 root hiding patches (requires ksu_variant=official)'
+        required: false
+        default: true
+        type: boolean
+      susfs_ref:
+        description: 'Commit/ref in simonpunk/susfs4ksu (branch gki-android12-5.10)'
+        required: false
+        default: '784ac9e6'
         type: string
       lto:
         description: 'Clang LTO mode (full matches stock GKI boot.img)'
@@ -143,6 +153,8 @@ jobs:
         env:
           KSU_VARIANT: ${{ inputs.ksu_variant || 'official' }}
           KSU_REF: ${{ inputs.ksu_ref || '' }}
+          ENABLE_SUSFS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.enable_susfs) && 'false' || 'true' }}
+          SUSFS_REF: ${{ inputs.susfs_ref || '784ac9e6' }}
           LTO_MODE: ${{ inputs.lto || 'full' }}
           KERNEL_SUFFIX: ${{ inputs.kernel_suffix || '' }}
           BUILD_IMAGE_LZ4: ${{ inputs.build_image_lz4 || false }}
@@ -163,16 +175,36 @@ jobs:
           fi
           echo "SCMVERSION=$(cat .scmversion)"
 
-          # Integrate KernelSU (kprobes/syscall/LSM hooks for GKI 5.10)
+          # Integrate KernelSU and optional SUSFS
           KSU_TAG=""
-          if [ "${KSU_VARIANT}" = "official" ]; then
+          if [ "${KSU_VARIANT}" = "none" ]; then
+            ENABLE_SUSFS="false"
+          elif [ "${KSU_VARIANT}" = "next" ] && [ "${ENABLE_SUSFS}" = "true" ]; then
+            echo "ERROR: enable_susfs=true in this workflow uses simonpunk/susfs4ksu 10_enable_susfs_for_ksu.patch which targets official tiann/KernelSU (ksu_variant=official). Set ksu_variant=official or enable_susfs=false."
+            exit 1
+          elif [ "${KSU_VARIANT}" = "official" ]; then
             echo "Integrating official tiann/KernelSU..."
+            if [ "${ENABLE_SUSFS}" = "true" ] && [ -z "${KSU_REF}" ]; then
+              KSU_REF="2a60b28"
+            fi
             if [ -n "${KSU_REF}" ]; then
               curl -fsSL "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s "${KSU_REF}"
             else
               curl -fsSL "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s
             fi
-            KSU_TAG="KSU"
+            echo "KernelSU HEAD: $(git -C KernelSU rev-parse --short HEAD)"
+            if [ "${ENABLE_SUSFS}" = "true" ]; then
+              echo "Applying SUSFS KernelSU patch (${SUSFS_REF})..."
+              rm -rf "${GITHUB_WORKSPACE}/susfs4ksu"
+              git clone --single-branch --branch gki-android12-5.10 \
+                https://gitlab.com/simonpunk/susfs4ksu.git \
+                "${GITHUB_WORKSPACE}/susfs4ksu"
+              git -C "${GITHUB_WORKSPACE}/susfs4ksu" checkout "${SUSFS_REF}"
+              git -C KernelSU apply "${GITHUB_WORKSPACE}/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+              KSU_TAG="KSU-SUSFS"
+            else
+              KSU_TAG="KSU"
+            fi
           elif [ "${KSU_VARIANT}" = "next" ]; then
             echo "Integrating KernelSU-Next..."
             if [ -n "${KSU_REF}" ]; then
@@ -183,6 +215,7 @@ jobs:
             KSU_TAG="KSUN"
           fi
           echo "ksu_tag=${KSU_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "enable_susfs=${ENABLE_SUSFS}" >> "${GITHUB_OUTPUT}"
 
           MAKE_ARGS=(
             -j"$(nproc)"
@@ -206,6 +239,22 @@ jobs:
 
           if [ "${KSU_VARIANT}" != "none" ]; then
             ./scripts/config --file out/.config -e KSU
+            if [ "${ENABLE_SUSFS}" = "true" ]; then
+              ./scripts/config --file out/.config \
+                -e KSU_SUSFS \
+                -e KSU_SUSFS_SUS_PATH \
+                -e KSU_SUSFS_SUS_MOUNT \
+                -e KSU_SUSFS_SUS_KSTAT \
+                -e KSU_SUSFS_SPOOF_UNAME \
+                -e KSU_SUSFS_ENABLE_LOG \
+                -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+                -e KSU_SUSFS_OPEN_REDIRECT \
+                -e KSU_SUSFS_SUS_MAP \
+                -e KSU_SUSFS_PRIORITY_UID_FILTER
+            else
+              ./scripts/config --file out/.config -d KSU_SUSFS
+            fi
           fi
 
           case "${LTO_MODE}" in
@@ -232,7 +281,20 @@ jobs:
 
           if [ "${KSU_VARIANT}" != "none" ]; then
             grep -q "^CONFIG_KSU=y$" out/.config
-            grep -q "^CONFIG_KPROBES=y$" out/.config
+            if [ "${ENABLE_SUSFS}" = "true" ]; then
+              grep -q "^CONFIG_KSU_SUSFS=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_SUS_PATH=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_SUS_MOUNT=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_SUS_KSTAT=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_SPOOF_UNAME=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_OPEN_REDIRECT=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_SUS_MAP=y$" out/.config
+              grep -q "^CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y$" out/.config
+            else
+              grep -q "^CONFIG_KPROBES=y$" out/.config
+            fi
           fi
 
           TARGETS=(Image)
@@ -301,6 +363,29 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      - name: Package SUSFS KernelSU module ZIP
+        id: package-susfs
+        if: steps.build.outputs.enable_susfs == 'true' && steps.build.outputs.ksu_tag == 'KSU-SUSFS'
+        working-directory: susfs4ksu
+        run: |
+          set -euo pipefail
+          bash build_ksu_module.sh
+          MODULE_PATH="${GITHUB_WORKSPACE}/susfs4ksu/ksu_module_susfs.zip"
+          test -f "${MODULE_PATH}"
+          echo "module_path=${MODULE_PATH}" >> "${GITHUB_OUTPUT}"
+          ls -lh "${MODULE_PATH}"
+          sha256sum "${MODULE_PATH}"
+          unzip -l "${MODULE_PATH}"
+
+      - name: Upload SUSFS KernelSU module artifact
+        if: steps.build.outputs.enable_susfs == 'true' && steps.build.outputs.ksu_tag == 'KSU-SUSFS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs4ksu-module-${{ steps.build.outputs.build_date }}
+          path: ${{ steps.package-susfs.outputs.module_path }}
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Publish GitHub Release
         if: ${{ inputs.create_release == true }}
         uses: softprops/action-gh-release@v2
@@ -310,8 +395,10 @@ jobs:
           body: |
             - **Device:** Realme GT 2 Pro / SM8450 (GKI 5.10.236)
             - **Kernel Release:** `${{ steps.build.outputs.kernel_release }}`
+            - **SUSFS:** `${{ steps.build.outputs.enable_susfs }}`
             - **LTO:** `${{ inputs.lto || 'full' }}`
             - **Commit:** `${{ github.sha }}`
             - **Flashable ZIP:** `${{ steps.package.outputs.zip_name }}`
           files: |
             ${{ steps.package.outputs.zip_path }}
+            ${{ steps.package-susfs.outputs.module_path }}
