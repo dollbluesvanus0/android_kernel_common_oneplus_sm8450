@@ -3,4 +3,7 @@ ccflags-y += -O3
 
 obj-$(CONFIG_LZ4_COMPRESS) += lz4_compress.o
 obj-$(CONFIG_LZ4HC_COMPRESS) += lz4hc_compress.o
-obj-$(CONFIG_LZ4_DECOMPRESS) += lz4_decompress.o
+obj-$(CONFIG_LZ4_DECOMPRESS) += lz4_decompress_mod.o
+
+lz4_decompress_mod-y := lz4_decompress.o
+lz4_decompress_mod-$(CONFIG_ARM64) += lz4armv8/lz4accel.o lz4armv8/lz4armv8.o

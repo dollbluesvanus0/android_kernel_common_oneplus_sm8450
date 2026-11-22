@@ -56,6 +56,11 @@ on:
         required: false
         default: true
         type: boolean
+      disable_mitigations:
+        description: 'Append mitigations=off to kernel CMDLINE (disables CPU Spectre/Meltdown/SSBD mitigations)'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -88,6 +93,7 @@ jobs:
             bc \
             bison \
             build-essential \
+            ccache \
             cpio \
             curl \
             device-tree-compiler \
@@ -147,6 +153,14 @@ jobs:
           "${GITHUB_WORKSPACE}/toolchain/clang/bin/clang" --version
           "${GITHUB_WORKSPACE}/toolchain/clang/bin/ld.lld" --version
 
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-gki-${{ inputs.lto || 'full' }}-${{ github.sha }}
+          restore-keys: |
+            ccache-gki-${{ inputs.lto || 'full' }}-
+
       - name: Configure and build GKI kernel
         id: build
         working-directory: kernel_platform/common
@@ -158,9 +172,20 @@ jobs:
           LTO_MODE: ${{ inputs.lto || 'full' }}
           KERNEL_SUFFIX: ${{ inputs.kernel_suffix || '' }}
           BUILD_IMAGE_LZ4: ${{ inputs.build_image_lz4 || false }}
+          DISABLE_MITIGATIONS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.disable_mitigations) && 'false' || 'true' }}
         run: |
           set -euo pipefail
-          export PATH="${GITHUB_WORKSPACE}/toolchain/clang/bin:${PATH}"
+          mkdir -p "${GITHUB_WORKSPACE}/ccache-bin"
+          ln -sf "$(command -v ccache)" "${GITHUB_WORKSPACE}/ccache-bin/clang"
+          ln -sf "$(command -v ccache)" "${GITHUB_WORKSPACE}/ccache-bin/clang++"
+          export CCACHE_DIR="${GITHUB_WORKSPACE}/.ccache"
+          export CCACHE_MAXSIZE="2.5G"
+          export CCACHE_COMPRESS=1
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export PATH="${GITHUB_WORKSPACE}/ccache-bin:${GITHUB_WORKSPACE}/toolchain/clang/bin:${PATH}"
+          ccache -z
           export ARCH=arm64
           export SUBARCH=arm64
           export KBUILD_BUILD_USER=android-build
@@ -237,6 +262,17 @@ jobs:
 
           make "${MAKE_ARGS[@]}" gki_defconfig
 
+          if [ "${DISABLE_MITIGATIONS}" = "true" ]; then
+            CUR_CMDLINE="$(sed -n 's/^CONFIG_CMDLINE="\(.*\)"$/\1/p' out/.config)"
+            case " ${CUR_CMDLINE} " in
+              *" mitigations=off "*) ;;
+              *)
+                ./scripts/config --file out/.config --set-str CMDLINE "${CUR_CMDLINE:+${CUR_CMDLINE} }mitigations=off"
+                ;;
+            esac
+          fi
+          echo "disable_mitigations=${DISABLE_MITIGATIONS}" >> "${GITHUB_OUTPUT}"
+
           # KMI-safe network (BBR, TTL/HL, IP_SET, IPv6 NAT, TPROXY) & tmpfs xattr/ACL extras
           ./scripts/config --file out/.config \
             -e TCP_CONG_ADVANCED -e TCP_CONG_CUBIC -e TCP_CONG_BBR -e DEFAULT_BBR -e NET_SCH_DEFAULT -e DEFAULT_FQ \
@@ -287,6 +323,7 @@ jobs:
 
           for sym in \
             WIREGUARD CFI_CLANG EXFAT_FS CRYPTO_ZSTD CRYPTO_LZ4 \
+            DEBUG_LIST PAGE_OWNER KASAN_HW_TAGS SCHEDSTATS HZ_250 \
             NET_SCH_FQ NET_SCH_FQ_CODEL DEFAULT_FQ \
             TCP_CONG_BBR TCP_CONG_CUBIC DEFAULT_BBR \
             NETFILTER_XT_TARGET_HL IP_NF_TARGET_TTL IP6_NF_TARGET_HL \
@@ -301,6 +338,20 @@ jobs:
               exit 1
             fi
           done
+
+          for sym in \
+            INIT_ON_ALLOC_DEFAULT_ON \
+            UBSAN UBSAN_TRAP UBSAN_LOCAL_BOUNDS UBSAN_BOUNDS UBSAN_ARRAY_BOUNDS UBSAN_SANITIZE_ALL; do
+            if grep -q "^CONFIG_${sym}=y$" out/.config; then
+              echo "ERROR: Unexpected CONFIG_${sym}=y in out/.config"
+              exit 1
+            fi
+          done
+
+          grep -q '^CONFIG_CMDLINE=".*init_on_alloc=0' out/.config
+          if [ "${DISABLE_MITIGATIONS}" = "true" ]; then
+            grep -q '^CONFIG_CMDLINE=".*mitigations=off' out/.config
+          fi
 
           if [ "${KSU_VARIANT}" != "none" ]; then
             grep -q "^CONFIG_KSU=y$" out/.config
@@ -326,6 +377,7 @@ jobs:
           fi
 
           make "${MAKE_ARGS[@]}" "${TARGETS[@]}"
+          ccache -s
 
           KERNEL_RELEASE="$(cat out/include/config/kernel.release)"
           BUILD_DATE="$(date -u +%Y%m%d-%H%M)"
@@ -424,6 +476,7 @@ jobs:
             - **Kernel Release:** `${{ steps.build.outputs.kernel_release }}`
             - **SUSFS:** `${{ steps.build.outputs.enable_susfs }}`
             - **LTO:** `${{ inputs.lto || 'full' }}`
+            - **Mitigations Off:** `${{ steps.build.outputs.disable_mitigations }}`
             - **Extras:** BBR, TTL/HL, IP_SET, IPv6 NAT, TPROXY, WireGuard, Tmpfs xattr/ACL
             - **Commit:** `${{ github.sha }}`
             - **Flashable ZIP:** `${{ steps.package.outputs.zip_name }}`

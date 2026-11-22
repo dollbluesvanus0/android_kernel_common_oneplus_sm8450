@@ -67,6 +67,12 @@ typedef uintptr_t uptrval;
 #define LZ4_LITTLE_ENDIAN 0
 #endif
 
+#define DEBUGLOG(l, ...) {}	/* disabled */
+
+#ifndef assert
+#define assert(condition) ((void)0)
+#endif
+
 /*-************************************
  *	Constants
  **************************************/
@@ -80,6 +86,7 @@ typedef uintptr_t uptrval;
  * without overflowing output buffer
  */
 #define MATCH_SAFEGUARD_DISTANCE  ((2 * WILDCOPYLENGTH) - MINMATCH)
+#define FASTLOOP_SAFE_DISTANCE 64
 
 /* Increase this value ==> compression run slower on incompressible data */
 #define LZ4_SKIPTRIGGER 6
@@ -176,6 +183,21 @@ static FORCE_INLINE void LZ4_wildCopy(void *dstPtr,
 
 	do {
 		LZ4_copy8(d, s);
+		d += 8;
+		s += 8;
+	} while (d < e);
+}
+
+/* customized variant of memcpy, which can overwrite up to 8 bytes beyond dstEnd */
+static FORCE_INLINE void LZ4_wildCopy8(void *dstPtr, const void *srcPtr,
+				       void *dstEnd)
+{
+	BYTE *d = (BYTE *)dstPtr;
+	const BYTE *s = (const BYTE *)srcPtr;
+	BYTE *const e = (BYTE *)dstEnd;
+
+	do {
+		LZ4_memcpy(d, s, 8);
 		d += 8;
 		s += 8;
 	} while (d < e);

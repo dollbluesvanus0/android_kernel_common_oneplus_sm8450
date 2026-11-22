@@ -52,6 +52,9 @@ KBUILD_AFLAGS	+= $(compat_vdso)
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
 
+# Tune instruction scheduling for SM8450 (Cortex-X2/A710/A510) while keeping baseline ISA
+KBUILD_CFLAGS	+= $(call cc-option,-mtune=cortex-a710,$(call cc-option,-mtune=cortex-a78,))
+
 # Avoid generating .eh_frame* sections.
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables -fno-unwind-tables
 KBUILD_AFLAGS	+= -fno-asynchronous-unwind-tables -fno-unwind-tables

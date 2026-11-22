@@ -320,6 +320,12 @@ int LZ4_decompress_safe(const char *source, char *dest, int compressedSize,
 int LZ4_decompress_safe_partial(const char *source, char *dest,
 	int compressedSize, int targetOutputSize, int maxDecompressedSize);
 
+ssize_t LZ4_arm64_decompress_safe(const void *source, void *dest,
+	size_t inputSize, size_t outputSize, bool dip);
+
+ssize_t LZ4_arm64_decompress_safe_partial(const void *source, void *dest,
+	size_t inputSize, size_t outputSize, bool dip);
+
 /*-************************************************************************
  *	LZ4 HC Compression
  **************************************************************************/
